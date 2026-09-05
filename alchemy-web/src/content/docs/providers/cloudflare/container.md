@@ -297,3 +297,29 @@ export async function loadBalance<T extends Container>(
   return container.fetch(request);
 }
 ```
+
+## Reusing unchanged builds in CI
+
+Set `tag` to a hash of all image inputs (the Dockerfile, copied files, build
+arguments and platform). Alchemy stores the completed build and registry push
+as one resource. With unchanged inputs, a fresh CI runner reuses the saved image
+reference without invoking Docker or requesting registry credentials. Runtime
+settings such as `instanceType` can change without rebuilding the image.
+
+```ts
+const sandbox = await Container("sandbox", {
+  className: "Sandbox",
+  tag: process.env.CONTAINER_INPUT_HASH,
+  build: { context: "./container", platform: "linux/amd64" },
+});
+```
+
+The caller must change the hash when file contents change: Alchemy compares
+properties, it does not hash the build directory. Omitting `tag` or using
+`latest` retains the existing timestamp-tag behavior. The first deployment with
+this cache builds once. Old registry images are retained.
+
+Use `alchemy deploy --force` to rebuild and push despite unchanged properties,
+including recovery after an image was manually deleted from the registry.
+Docker still honors its layer cache; use `build.options: ["--pull", "--no-cache"]`
+when intentionally refreshing mutable base images or downloaded dependencies.

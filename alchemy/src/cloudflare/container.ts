@@ -1,3 +1,4 @@
+import { alchemy } from "../alchemy.ts";
 import type { Context } from "../context.ts";
 import { DockerApi } from "../docker/api.ts";
 import {
@@ -494,39 +495,66 @@ export async function Container<T>(
 
   const api = await createCloudflareApi(props);
 
-  const image = await Image(id, {
+  const image = await ContainerImage(`${id}-registry-image`, {
     name: `${api.accountId}/${name}`,
     tag,
     build: props.build
-      ? {
-          platform: props.build?.platform ?? "linux/amd64",
-          ...props.build,
-        }
+      ? { platform: "linux/amd64", ...props.build }
       : {
           dockerfile: "Dockerfile",
           platform: "linux/amd64",
           context: process.cwd(),
         },
-    image: props.image,
-    skipPush: true,
-  } as ImageProps);
-
-  const credentials = await getContainerCredentials(api);
-  const pushedImage = await pushImageToRegistry(image.imageRef, {
-    server: "registry.cloudflare.com",
-    username: credentials.username || credentials.user!,
-    password: credentials.password,
-  });
-
-  return {
-    ...output,
-    image: {
-      ...image,
-      imageRef: pushedImage.imageRef,
-      repoDigest: pushedImage.repoDigest,
+    api: {
+      accountId: api.accountId,
+      apiToken: props.apiToken,
+      apiKey: props.apiKey,
+      email: props.email,
+      profile: props.profile,
+      baseUrl: props.baseUrl,
     },
-  };
+  });
+  return { ...output, image };
 }
+
+// Cache the complete remote operation, not a local Docker image. A fresh CI
+// runner can reuse this output without Docker or temporary registry credentials.
+type ContainerImage = Image;
+interface ContainerImageProps {
+  name: string;
+  tag: string;
+  build: DockerBuildOptions;
+  api: CloudflareApiOptions;
+}
+const ContainerImage = Resource(
+  "cloudflare::ContainerImage",
+  async function (
+    this: Context<ContainerImage>,
+    _id: string,
+    props: ContainerImageProps,
+  ): Promise<ContainerImage> {
+    // Registry images are retained, just like docker::Image.
+    if (this.phase === "delete") return this.destroy();
+    // If a prior push failed, the local image may be gone on the retrying
+    // runner. Always rebuild when this outer resource actually runs.
+    return alchemy.run("build", { force: true }, async () => {
+      const image = await Image("image", {
+        name: props.name,
+        tag: props.tag,
+        build: props.build,
+        skipPush: true,
+      });
+      const api = await createCloudflareApi(props.api);
+      const credentials = await getContainerCredentials(api);
+      const pushed = await pushImageToRegistry(image.imageRef, {
+        server: "registry.cloudflare.com",
+        username: credentials.username || credentials.user!,
+        password: credentials.password,
+      });
+      return { ...image, ...pushed };
+    });
+  },
+);
 
 /**
  * Configuration for progressive rollout strategy when updating container applications.
