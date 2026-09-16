@@ -13,14 +13,15 @@ export interface D1LocalMigrationOptions {
 export const applyLocalD1Migrations = async (
   options: D1LocalMigrationOptions,
 ) => {
-  const miniflare = new mf.Miniflare({
-    script: "",
-    modules: true,
-    defaultPersistRoot: getDefaultPersistPath(options.rootDir),
-    d1Persist: true,
-    d1Databases: { DB: options.databaseId },
-    log: process.env.DEBUG ? new mf.Log(mf.LogLevel.DEBUG) : undefined,
-  });
+  const miniflare = new mf.Miniflare(
+    mf.convertV4MiniflareOptions({
+      script: "",
+      modules: true,
+      resourcePersistencePath: getDefaultPersistPath(options.rootDir),
+      d1Databases: { DB: options.databaseId },
+      log: process.env.DEBUG ? new mf.Log(mf.LogLevel.DEBUG) : undefined,
+    }),
+  );
   try {
     await miniflare.ready;
     const db = await miniflare.getD1Database("DB");

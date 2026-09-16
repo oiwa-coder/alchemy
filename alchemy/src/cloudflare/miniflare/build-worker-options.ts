@@ -70,18 +70,21 @@ type RemoteBinding =
   // so we mirror that here for the remote-binding-proxy upload.
   | Extract<WorkerBindingSpec, { type: "ai_search" | "ai_search_namespace" }>;
 
+export type MiniflareWorkerOptions = miniflare.V4WorkerOptions &
+  Pick<miniflare.V4SharedOptions, "containerEngine">;
+
 type BaseWorkerOptions = {
-  [K in keyof miniflare.WorkerOptions]: K extends
+  [K in keyof miniflare.V4WorkerOptionsShape]: K extends
     | "compatibilityFlags"
     | "routes"
-    ? miniflare.WorkerOptions[K]
-    : Exclude<miniflare.WorkerOptions[K], string[]>;
-};
+    ? miniflare.V4WorkerOptionsShape[K]
+    : Exclude<miniflare.V4WorkerOptionsShape[K], string[]>;
+} & Pick<miniflare.V4SharedOptions, "containerEngine">;
 
 export const buildWorkerOptions = async (
   input: MiniflareWorkerInput,
 ): Promise<{
-  watch: (signal: AbortSignal) => AsyncGenerator<miniflare.WorkerOptions>;
+  watch: (signal: AbortSignal) => AsyncGenerator<MiniflareWorkerOptions>;
   remoteProxy: HTTPServer | undefined;
 }> => {
   const remoteBindings: RemoteBinding[] = [];
@@ -303,6 +306,7 @@ export const buildWorkerOptions = async (
       }
       case "ratelimit": {
         (options.ratelimits ??= {})[key] = {
+          namespace_id: String(binding.namespace_id),
           simple: binding.simple,
         };
         break;

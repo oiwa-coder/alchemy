@@ -402,14 +402,15 @@ export async function insertLocalKVRecords(input: {
   values: KVPair[];
   rootDir: string;
 }) {
-  const miniflare = new mf.Miniflare({
-    script: "",
-    modules: true,
-    defaultPersistRoot: getDefaultPersistPath(input.rootDir),
-    kvNamespaces: { KV: input.namespaceId },
-    kvPersist: true,
-    log: process.env.DEBUG ? new mf.Log(mf.LogLevel.DEBUG) : undefined,
-  });
+  const miniflare = new mf.Miniflare(
+    mf.convertV4MiniflareOptions({
+      script: "",
+      modules: true,
+      resourcePersistencePath: getDefaultPersistPath(input.rootDir),
+      kvNamespaces: { KV: input.namespaceId },
+      log: process.env.DEBUG ? new mf.Log(mf.LogLevel.DEBUG) : undefined,
+    }),
+  );
   try {
     await miniflare.ready;
     const kv = await miniflare.getKVNamespace("KV");

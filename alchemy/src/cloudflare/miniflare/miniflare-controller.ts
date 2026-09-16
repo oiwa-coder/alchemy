@@ -9,6 +9,7 @@ import { AsyncMutex } from "../../util/mutex.ts";
 import {
   buildWorkerOptions,
   type MiniflareWorkerInput,
+  type MiniflareWorkerOptions,
 } from "./build-worker-options.ts";
 import {
   createMiniflareWorkerProxy,
@@ -25,7 +26,7 @@ export class MiniflareController {
   abort = new AbortController();
   miniflare: miniflare.Miniflare | undefined;
   miniflarePromise: PromiseWithResolvers<miniflare.Miniflare> | undefined;
-  options = new Map<string, miniflare.WorkerOptions>();
+  options = new Map<string, MiniflareWorkerOptions>();
   tunnel: Tunnel | undefined;
   localProxies = new Map<string, MiniflareWorkerProxy>();
   remoteProxies = new Map<string, HTTPServer>();
@@ -77,7 +78,7 @@ export class MiniflareController {
 
   private async watch(
     id: string,
-    watcher: AsyncGenerator<miniflare.WorkerOptions>,
+    watcher: AsyncGenerator<MiniflareWorkerOptions>,
   ) {
     for await (const options of watcher) {
       this.options.set(options.name!, options);
@@ -94,49 +95,30 @@ export class MiniflareController {
 
   private async update() {
     return await this.mutex.lock(async () => {
-      const options: miniflare.MiniflareOptions = {
-        workers: [],
-        defaultPersistRoot: path.resolve(
+      const workers: miniflare.V4WorkerOptions[] = [];
+      const options: miniflare.V4MiniflareOptions = {
+        workers,
+        resourcePersistencePath: path.resolve(
           getDefaultPersistPath(Scope.current.rootDir),
         ),
         unsafeDevRegistryPath: miniflare.getDefaultDevRegistryPath(),
         log: process.env.DEBUG
           ? new miniflare.Log(miniflare.LogLevel.DEBUG)
           : new DefaultLogger(),
-        // This is required to allow websites and other separate processes
-        // to detect Alchemy-managed Durable Objects via the Wrangler dev registry.
-        unsafeDevRegistryDurableObjectProxy: true,
         // This exposes other handlers like `scheduled` and `email` via HTTP.
         unsafeTriggerHandlers: true,
         // Enable the Local Explorer (/cdn-cgi/explorer)
         unsafeLocalExplorer: true,
       };
-      for (const worker of this.options.values()) {
-        options.workers.push(worker);
-        // avoid creating unnecessary directories
-        if (worker.analyticsEngineDatasets) {
-          options.analyticsEngineDatasetsPersist = true;
-        }
-        if (worker.d1Databases) {
-          options.d1Persist = true;
-        }
-        if (worker.durableObjects) {
-          options.durableObjectsPersist = true;
-        }
-        if (worker.kvNamespaces) {
-          options.kvPersist = true;
-        }
-        if (worker.r2Buckets) {
-          options.r2Persist = true;
-        }
-        if (worker.secretsStoreSecrets) {
-          options.secretsStorePersist = true;
-        }
-        if (worker.workflows) {
-          options.workflowsPersist = true;
+      for (const { containerEngine, ...worker } of this.options.values()) {
+        workers.push(worker);
+        if (containerEngine) {
+          options.containerEngine = containerEngine;
         }
       }
-      return await this.setMiniflareOptions(options);
+      return await this.setMiniflareOptions(
+        miniflare.convertV4MiniflareOptions(options),
+      );
     });
   }
 

@@ -479,13 +479,15 @@ export async function R2Bucket(
     if (_miniflare) {
       return _miniflare;
     }
-    _miniflare = new mf.Miniflare({
-      script: "",
-      modules: true,
-      defaultPersistRoot: getDefaultPersistPath(scope.rootDir),
-      r2Buckets: [bucket.dev.id],
-      log: process.env.DEBUG ? new mf.Log(mf.LogLevel.DEBUG) : undefined,
-    });
+    _miniflare = new mf.Miniflare(
+      mf.convertV4MiniflareOptions({
+        script: "",
+        modules: true,
+        resourcePersistencePath: getDefaultPersistPath(scope.rootDir),
+        r2Buckets: [bucket.dev.id],
+        log: process.env.DEBUG ? new mf.Log(mf.LogLevel.DEBUG) : undefined,
+      }),
+    );
     scope.onCleanup(async () => _miniflare?.dispose());
     return _miniflare;
   };
