@@ -916,18 +916,27 @@ export const ContainerApplication = Resource(
         }
       : undefined;
 
-    if (this.phase === "update" && this.output?.id) {
-      const application = await updateContainerApplication(
-        api,
-        this.output.id,
-        {
-          instances: props.instances ?? 1,
-          max_instances: props.maxInstances ?? 10,
-          scheduling_policy: props.schedulingPolicy ?? "default",
-          constraints,
-          configuration,
-        },
-      );
+    const boundToNamespace = (application: ContainerApplicationData) =>
+      props.durableObjects === undefined ||
+      application.durable_objects?.namespace_id ===
+        props.durableObjects.namespaceId;
+
+    const existing =
+      this.phase === "update" && this.output?.id
+        ? await getContainerApplication(api, this.output.id)
+        : undefined;
+    if (existing && !boundToNamespace(existing)) {
+      await deleteContainerApplication(api, existing.id);
+    }
+
+    if (existing && boundToNamespace(existing)) {
+      const application = await updateContainerApplication(api, existing.id, {
+        instances: props.instances ?? 1,
+        max_instances: props.maxInstances ?? 10,
+        scheduling_policy: props.schedulingPolicy ?? "default",
+        constraints,
+        configuration,
+      });
       // TODO(sam): should we wait for the rollout to complete?
       const stepPercentage =
         props.rollout?.strategy === "immediate"
@@ -949,29 +958,22 @@ export const ContainerApplication = Resource(
       };
     } else {
       let application: ContainerApplicationData;
+      const createBody = {
+        name: applicationName,
+        scheduling_policy: props.schedulingPolicy ?? "default",
+        instances: props.instances ?? 1,
+        max_instances: props.maxInstances ?? 1,
+        durable_objects: props.durableObjects
+          ? {
+              namespace_id: props.durableObjects.namespaceId,
+            }
+          : undefined,
+        constraints,
+        configuration,
+      };
 
       try {
-        application = await createContainerApplication(api, adopt, {
-          name: applicationName,
-          scheduling_policy: props.schedulingPolicy ?? "default",
-          instances: props.instances ?? 1,
-          max_instances: props.maxInstances ?? 1,
-          durable_objects: props.durableObjects
-            ? {
-                namespace_id: props.durableObjects.namespaceId,
-              }
-            : undefined,
-          constraints,
-          configuration: {
-            image: imageReference,
-            instance_type: props.instanceType ?? "dev",
-            observability: {
-              logs: {
-                enabled: true,
-              },
-            },
-          },
-        });
+        application = await createContainerApplication(api, adopt, createBody);
       } catch (error) {
         // Check if this is an "already exists" error and adopt is enabled
         if (
@@ -989,6 +991,16 @@ export const ContainerApplication = Resource(
             throw new Error(
               `Failed to find existing container application '${applicationName}' for adoption`,
             );
+          }
+
+          if (!boundToNamespace(existingApplication)) {
+            await deleteContainerApplication(api, existingApplication.id);
+            application = await createContainerApplication(
+              api,
+              false,
+              createBody,
+            );
+            return { id: application.id, name: application.name };
           }
 
           // Update the existing application with new properties
