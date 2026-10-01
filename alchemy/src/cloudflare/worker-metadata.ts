@@ -11,7 +11,11 @@ import type {
   WorkerBindingDurableObjectNamespace,
   WorkerBindingSpec,
 } from "./bindings.ts";
-import { isContainer, type Container } from "./container.ts";
+import {
+  isContainer,
+  isDurableObjectContainer,
+  type Container,
+} from "./container.ts";
 import {
   isDurableObjectNamespace,
   type DurableObjectNamespace,
@@ -219,7 +223,11 @@ export interface WorkerMetadata {
     cron: string;
     suspended: boolean;
   }[];
-  containers?: { class_name: string }[];
+  containers?: {
+    class_name: string;
+    name?: string;
+    images?: Record<string, string>;
+  }[];
   placement?: WorkerPlacement;
   limits?: {
     cpu_ms?: number;
@@ -656,7 +664,26 @@ export async function prepareWorkerMetadata(
         // we do not need configure class migrations for cross-script bindings
         configureClassMigration(bindingName, binding);
       }
-      (meta.containers ??= []).push({ class_name: binding.className });
+      if (isDurableObjectContainer(binding)) {
+        const images = Object.fromEntries(
+          Object.entries(binding.images).map(([key, image]) => {
+            if (!image.repoDigest)
+              throw new Error(`Container: image ${key} has no repoDigest.`);
+            return [key, image.repoDigest];
+          }),
+        );
+        if (!binding.name)
+          throw new Error(
+            "Container: durable_object metadata requires a name.",
+          );
+        (meta.containers ??= []).push({
+          name: binding.name,
+          class_name: binding.className,
+          images,
+        });
+      } else {
+        (meta.containers ??= []).push({ class_name: binding.className });
+      }
     } else if (binding.type === "ratelimit") {
       meta.bindings.push({
         type: "ratelimit",

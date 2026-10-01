@@ -29,7 +29,11 @@ import {
   type CompatibilityPreset,
   unionCompatibilityFlags,
 } from "./compatibility-presets.ts";
-import { type Container, ContainerApplication } from "./container.ts";
+import {
+  assertNoContainerSchedulingPolicyFlip,
+  type Container,
+  ContainerApplication,
+} from "./container.ts";
 import { CustomDomain } from "./custom-domain.ts";
 import type { DispatchNamespace } from "./dispatch-namespace.ts";
 import {
@@ -1109,6 +1113,13 @@ const _Worker = Resource(
         durableObjects,
       };
     })();
+    if (this.phase === "update") {
+      assertNoContainerSchedulingPolicyFlip(
+        this.output.bindings,
+        options.containers,
+        options.name,
+      );
+    }
     const scriptName = options.name;
 
     if (this.phase === "delete") {

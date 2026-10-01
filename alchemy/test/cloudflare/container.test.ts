@@ -14,6 +14,7 @@ import { destroy } from "../../src/destroy.ts";
 import { Image } from "../../src/docker/image.ts";
 import { RemoteImage } from "../../src/docker/remote-image.ts";
 import "../../src/test/vitest.ts";
+import { fetchAndExpectOK } from "../../src/util/safe-fetch.ts";
 import { BRANCH_PREFIX } from "../util.ts";
 
 const test = alchemy.test(import.meta, {
@@ -23,6 +24,52 @@ const test = alchemy.test(import.meta, {
 const api = await createCloudflareApi();
 
 describe.sequential("Container Resource", () => {
+  test("create a durable object policy worker with named images", async (scope) => {
+    const containerName = `${BRANCH_PREFIX}-named-image-container`;
+    const workerName = `${BRANCH_PREFIX}-named-image-worker`;
+    try {
+      const worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        entrypoint: path.join(
+          import.meta.dirname,
+          "container-durable-object-handler.ts",
+        ),
+        compatibilityFlags: ["nodejs_compat"],
+        compatibilityDate: "2026-10-01",
+        format: "esm",
+        url: true,
+        bindings: {
+          MY_CONTAINER: await Container(containerName, {
+            name: containerName,
+            className: "NamedImageContainer",
+            schedulingPolicy: "durable_object",
+            images: {
+              generation: {
+                build: { context: path.join(import.meta.dirname, "container") },
+                tag: "latest",
+              },
+            },
+            adopt: true,
+          }),
+        },
+      });
+      const application = await getContainerApplicationByName(
+        api,
+        containerName,
+      );
+      expect(application?.scheduling_policy).toBe("durable_object");
+      expect(application?.id).toBe(application?.durable_objects.namespace_id);
+      const response = await fetchAndExpectOK(worker.url!);
+      expect(await response.text()).toContain("Directory listing");
+    } finally {
+      await destroy(scope);
+      expect(
+        await getContainerApplicationByName(api, containerName),
+      ).toBeUndefined();
+    }
+  });
+
   test("create container", async (scope) => {
     try {
       const make = async (dockerfile?: string) =>

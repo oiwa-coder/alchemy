@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "pathe";
-import type { Unstable_Config as WranglerJsonConfig } from "wrangler";
+import type { Unstable_Config as BaseWranglerJsonConfig } from "wrangler";
 import type { Context } from "../context.ts";
 import { Resource } from "../resource.ts";
 import { Scope } from "../scope.ts";
@@ -10,7 +10,10 @@ import { isAiSearchNamespace } from "./ai-search-namespace.ts";
 import { isAiSearch } from "./ai-search.ts";
 import { createCloudflareApi } from "./api.ts";
 import type { Bindings } from "./bindings.ts";
-import { getCloudflareRegistryWithAccountNamespace } from "./container.ts";
+import {
+  getCloudflareRegistryWithAccountNamespace,
+  isDurableObjectContainer,
+} from "./container.ts";
 import type { DurableObjectNamespace } from "./durable-object-namespace.ts";
 import type { EventSource } from "./event-source.ts";
 import { isQueueEventSource } from "./event-source.ts";
@@ -18,6 +21,21 @@ import { isQueue } from "./queue.ts";
 import { unencryptSecrets } from "./util/filter-env-bindings.ts";
 import { getAccountSubdomain } from "./worker-subdomain.ts";
 import { isWorker, Worker, type WorkerProps } from "./worker.ts";
+
+type WranglerJsonConfig = Omit<BaseWranglerJsonConfig, "containers"> & {
+  containers: (
+    | NonNullable<BaseWranglerJsonConfig["containers"]>[number]
+    | {
+        name: string;
+        class_name: string;
+        scheduling_policy: "durable_object";
+        images: Record<
+          string,
+          { dockerfile: string; build_context?: string } | { image: string }
+        >;
+      }
+  )[];
+};
 
 /**
  * Properties for wrangler.json configuration file
@@ -561,6 +579,55 @@ async function processBindings(
         script_name: binding.scriptName,
       });
       new_sqlite_classes.push(binding.className);
+      if (isDurableObjectContainer(binding)) {
+        const images = Object.fromEntries(
+          await Promise.all(
+            Object.entries(binding.images).map(async ([key, img]) => {
+              if (img.build) {
+                return [
+                  key,
+                  {
+                    dockerfile: path.resolve(
+                      workerCwd,
+                      path.join(
+                        img.build.context ?? process.cwd(),
+                        img.build.dockerfile ?? "Dockerfile",
+                      ),
+                    ),
+                    ...(img.build.context && {
+                      build_context: path.resolve(workerCwd, img.build.context),
+                    }),
+                  },
+                ];
+              }
+              const accountId = await getAccountId();
+              const prefix = getCloudflareRegistryWithAccountNamespace(
+                accountId,
+                "",
+              );
+              const reference = img.repoDigest ?? img.imageRef;
+              return [
+                key,
+                {
+                  image: getCloudflareRegistryWithAccountNamespace(
+                    accountId,
+                    reference.startsWith(prefix)
+                      ? reference.slice(prefix.length)
+                      : reference,
+                  ),
+                },
+              ];
+            }),
+          ),
+        );
+        containers.push({
+          name: binding.name,
+          class_name: binding.className,
+          scheduling_policy: "durable_object",
+          images,
+        });
+        continue;
+      }
       // If there are build options, use the local image path, otherwise use the image reference
       const image = binding.image.build
         ? path.resolve(

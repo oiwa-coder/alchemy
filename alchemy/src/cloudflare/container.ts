@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { alchemy } from "../alchemy.ts";
 import type { Context } from "../context.ts";
 import { DockerApi } from "../docker/api.ts";
@@ -10,11 +11,13 @@ import { pushImageToRegistry } from "../docker/registry.ts";
 import type { RemoteImage } from "../docker/remote-image.ts";
 import { Resource } from "../resource.ts";
 import { Scope } from "../scope.ts";
+import { sleep } from "../util/sleep.ts";
 import {
   createCloudflareApi,
   type CloudflareApi,
   type CloudflareApiOptions,
 } from "./api.ts";
+import type { Bindings } from "./bindings.ts";
 
 /**
  * Common properties shared between build and image container configurations
@@ -65,7 +68,7 @@ interface ContainerPropsBase extends Partial<CloudflareApiOptions> {
    *
    * @default "default"
    */
-  schedulingPolicy?: SchedulingPolicy;
+  schedulingPolicy?: DefaultSchedulingPolicy;
 
   /**
    * Whether to adopt an existing container application with the same name.
@@ -184,7 +187,80 @@ interface ContainerPropsWithBuild extends ContainerPropsBase {
  *   }
  * });
  */
-export type ContainerProps = ContainerPropsWithImage | ContainerPropsWithBuild;
+export type ContainerProps =
+  | ContainerPropsWithImage
+  | ContainerPropsWithBuild
+  | ContainerPropsWithDurableObjectScheduling;
+
+export type ContainerNamedImage =
+  | { build: DockerBuildOptions; tag?: string; image?: never }
+  | { image: string | Image | RemoteImage; build?: never; tag?: never };
+
+interface ContainerPropsWithDurableObjectScheduling extends Omit<
+  ContainerPropsBase,
+  | "schedulingPolicy"
+  | "tag"
+  | "instanceType"
+  | "maxInstances"
+  | "rollout"
+  | "constraints"
+> {
+  name?: string;
+  schedulingPolicy: "durable_object";
+  images: Record<string, ContainerNamedImage>;
+  image?: never;
+  build?: never;
+  tag?: never;
+  instanceType?: never;
+  maxInstances?: never;
+  rollout?: never;
+  constraints?: never;
+}
+
+function validateDurableObjectContainerProps(
+  props: ContainerPropsWithDurableObjectScheduling,
+) {
+  for (const key of [
+    "image",
+    "build",
+    "tag",
+    "instanceType",
+    "maxInstances",
+    "rollout",
+    "constraints",
+  ] as const) {
+    if (key in props) {
+      throw new Error(
+        `Container: ${key} is not supported with durable_object scheduling; start() chooses the image and instance configuration.`,
+      );
+    }
+  }
+  const keys = Object.keys(props.images ?? {});
+  if (keys.length < 1 || keys.length > 100) {
+    throw new Error("Container: images must contain between 1 and 100 keys.");
+  }
+  if (keys.some((key) => key.length < 1 || key.length > 128)) {
+    throw new Error(
+      "Container: image keys must contain between 1 and 128 characters.",
+    );
+  }
+}
+
+export function validateContainerImageReference(
+  accountId: string,
+  image: string,
+): string {
+  const prefix = `registry.cloudflare.com/${accountId}/`;
+  if (
+    !image.startsWith(prefix) ||
+    !/^[^@: \s]+@sha256:[a-fA-F0-9]{64}$/.test(image.slice(prefix.length))
+  ) {
+    throw new Error(
+      `Container: image must be digest-pinned as registry.cloudflare.com/${accountId}/<repo>@sha256:<64 hex>; received ${image}.`,
+    );
+  }
+  return image;
+}
 
 /**
  * Instance types for Cloudflare Container deployments.
@@ -236,7 +312,7 @@ export function isContainer(binding: any): binding is Container {
  *
  * @template T - Type parameter for additional container-specific properties
  */
-export type Container<T = any> = {
+type DefaultContainer<T = any> = {
   /** Identifies this as a container binding type */
   type: "container";
 
@@ -272,7 +348,7 @@ export type Container<T = any> = {
   observability?: DeploymentObservability;
 
   /** Scheduling policy for container placement */
-  schedulingPolicy?: SchedulingPolicy;
+  schedulingPolicy?: DefaultSchedulingPolicy;
 
   /** Whether this container was adopted from an existing deployment */
   adopt?: boolean;
@@ -301,6 +377,59 @@ export type Container<T = any> = {
    */
   __phantom?: T;
 };
+
+export type Container<T = any> =
+  | DefaultContainer<T>
+  | (Omit<
+      DefaultContainer<T>,
+      | "image"
+      | "schedulingPolicy"
+      | "instanceType"
+      | "maxInstances"
+      | "rollout"
+      | "constraints"
+      | "name"
+    > & {
+      name: string;
+      schedulingPolicy: "durable_object";
+      images: Record<string, Image>;
+    });
+
+export function isDurableObjectContainer<T = any>(
+  binding: unknown,
+): binding is Extract<Container<T>, { schedulingPolicy: "durable_object" }> {
+  return (
+    typeof binding === "object" &&
+    binding !== null &&
+    isContainer(binding) &&
+    binding.schedulingPolicy === "durable_object"
+  );
+}
+
+export function assertNoContainerSchedulingPolicyFlip(
+  previousBindings: Bindings | undefined,
+  containers: Container[],
+  scriptName: string,
+) {
+  const previous = Object.values(previousBindings ?? {});
+  for (const container of containers) {
+    if (
+      isDurableObjectContainer(container) &&
+      (container.scriptName === undefined ||
+        container.scriptName === scriptName) &&
+      previous.some(
+        (binding) =>
+          isContainer(binding) &&
+          binding.className === container.className &&
+          binding.schedulingPolicy !== "durable_object",
+      )
+    ) {
+      throw new Error(
+        `Container application for class "${container.className}" uses the default policy. The switch to durable_object is one-way and is not done in place. It was refused before the Worker upload, so the live Worker is unchanged. Add a new Durable Object class (new className, new container name) next to the old one.`,
+      );
+    }
+  }
+}
 
 /**
  * Normalize an image reference for Cloudflare Container deployments.
@@ -347,10 +476,26 @@ export function resolveImageName(accountId: string, image: string): string {
   return image;
 }
 
+export function Container<T>(
+  id: string,
+  props: ContainerPropsWithDurableObjectScheduling,
+): Promise<Extract<Container<T>, { schedulingPolicy: "durable_object" }>>;
+export function Container<T>(
+  id: string,
+  props: ContainerPropsWithImage | ContainerPropsWithBuild,
+): Promise<DefaultContainer<T>>;
+export function Container<T>(
+  id: string,
+  props: ContainerProps,
+): Promise<Container<T>>;
 export async function Container<T>(
   id: string,
   props: ContainerProps,
 ): Promise<Container<T>> {
+  if (props.schedulingPolicy === "durable_object") {
+    validateDurableObjectContainerProps(props);
+    return createDurableObjectContainer<T>(id, props);
+  }
   // Validate that build and image are mutually exclusive
   if (props.build && props.image) {
     throw new Error("Container: specify either `build` or `image`, not both.");
@@ -363,7 +508,7 @@ export async function Container<T>(
       ? `latest-${Date.now()}`
       : props.tag;
 
-  const output: Omit<Container<T>, "image"> = {
+  const output: Omit<DefaultContainer<T>, "image"> = {
     type: "container",
     id,
     name,
@@ -517,15 +662,182 @@ export async function Container<T>(
   return { ...output, image };
 }
 
+async function createDurableObjectContainer<T>(
+  id: string,
+  props: ContainerPropsWithDurableObjectScheduling,
+): Promise<Extract<Container<T>, { schedulingPolicy: "durable_object" }>> {
+  const scope = Scope.current;
+  const name = props.name ?? scope.createPhysicalName(id);
+  const isDev = scope.local && !props.dev?.remote;
+  const api = isDev ? undefined : await createCloudflareApi(props);
+  const latestTag = `latest-${Date.now()}`;
+  const builds: { input: ContainerNamedImage; image: Promise<Image> }[] = [];
+  const entries = Object.entries(props.images).map(([key, input]) => {
+    const normalized = input.build
+      ? {
+          build: { platform: "linux/amd64", ...input.build },
+          tag:
+            input.tag === undefined || input.tag === "latest"
+              ? latestTag
+              : input.tag,
+        }
+      : {
+          image: api
+            ? validateContainerImageReference(
+                api.accountId,
+                resolveImageName(
+                  api.accountId,
+                  typeof input.image === "string"
+                    ? input.image
+                    : input.image!.kind === "Image"
+                      ? (input.image!.repoDigest ?? input.image!.imageRef)
+                      : input.image!.imageRef,
+                ),
+              )
+            : input.image!,
+        };
+    return { key, input: normalized };
+  });
+  const images = Object.fromEntries(
+    await Promise.all(
+      entries.map(async ({ key, input }) => {
+        const existing = builds.find((build) =>
+          isDeepStrictEqual(build.input, input),
+        );
+        if (existing && !isDev) return [key, await existing.image];
+        const image = (async () => {
+          const tag = input.tag ?? (isDev ? latestTag : "latest");
+          if (!api) {
+            if (input.build) {
+              return Image(`${id}-${key}`, {
+                name: `${MF_DEV_CONTAINER_PREFIX}/${name}-${key}`,
+                build: input.build,
+                tag,
+              });
+            }
+            const container = await Container(`${id}-${key}`, {
+              ...props,
+              schedulingPolicy: "default",
+              name: `${name}-${key}`,
+              image: input.image,
+              tag,
+            });
+            return container.image;
+          }
+          const image = await ContainerImage(`${id}-${key}-registry-image`, {
+            name: `${api.accountId}/${name}-${key}`,
+            tag,
+            ...input,
+            prepare: true,
+            api: {
+              accountId: api.accountId,
+              apiToken: props.apiToken,
+              apiKey: props.apiKey,
+              email: props.email,
+              profile: props.profile,
+              baseUrl: props.baseUrl,
+            },
+          });
+          if (!image.repoDigest)
+            throw new Error(
+              `Container: image ${key} was pushed without a sha256 digest.`,
+            );
+          validateContainerImageReference(api.accountId, image.repoDigest);
+          return image;
+        })();
+        builds.push({ input, image });
+        return [key, await image];
+      }),
+    ),
+  );
+  return {
+    type: "container",
+    id,
+    name,
+    className: props.className,
+    scriptName: props.scriptName,
+    observability: props.observability,
+    schedulingPolicy: "durable_object",
+    sqlite: true,
+    dev: props.dev,
+    adopt: props.adopt,
+    images,
+  };
+}
+
+export async function prepareContainerImage(
+  api: Pick<CloudflareApi, "accountId" | "post">,
+  image: string,
+  options: {
+    pollIntervalMs?: number;
+    timeoutMs?: number;
+    sleep?: (ms: number) => Promise<void>;
+  } = {},
+): Promise<void> {
+  const endpoint = `/accounts/${api.accountId}/containers/image-preparations`;
+  const pollIntervalMs = options.pollIntervalMs ?? 2000;
+  const timeoutMs = options.timeoutMs ?? 15 * 60 * 1000;
+  const wait = options.sleep ?? sleep;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const response = await api.post(endpoint, { image });
+    if (response.status === 403) {
+      throw new Error(
+        `Container image preparation is not enabled for account ${api.accountId}: POST ${endpoint} returned 403.`,
+      );
+    }
+    const result = (await response.json()) as {
+      result: { status: "pending" | "ready" | "error"; reason?: string };
+      errors: { code: number; message: string }[];
+    };
+    if (!response.ok) {
+      throw new Error(
+        `Failed to prepare container image ${image}: ${result.errors?.map((e) => `[${e.code}] ${e.message}`).join(", ") ?? "Unknown error"}`,
+      );
+    }
+    if (result.result.status === "ready") return;
+    if (result.result.status === "error") {
+      throw new Error(
+        `Failed to prepare container image ${image}: ${result.result.reason ?? "Unknown error"}`,
+      );
+    }
+    const remaining = deadline - Date.now();
+    if (remaining > 0) await wait(Math.min(pollIntervalMs, remaining));
+  }
+  throw new Error(
+    `Timed out preparing container image ${image} after ${timeoutMs}ms at ${endpoint}.`,
+  );
+}
+
+const imagePreparations = new WeakMap<Scope, Map<string, Promise<void>>>();
+
+async function prepareContainerImageOnce(api: CloudflareApi, image: string) {
+  const scope = Scope.current.root;
+  let preparations = imagePreparations.get(scope);
+  if (!preparations) imagePreparations.set(scope, (preparations = new Map()));
+  let preparation = preparations.get(image);
+  if (!preparation) {
+    preparation = prepareContainerImage(api, image).catch((error) => {
+      preparations.delete(image);
+      throw error;
+    });
+    preparations.set(image, preparation);
+  }
+  await preparation;
+}
+
 // Cache the complete remote operation, not a local Docker image. A fresh CI
 // runner can reuse this output without Docker or temporary registry credentials.
 type ContainerImage = Image;
-interface ContainerImageProps {
+type ContainerImageProps = {
   name: string;
   tag: string;
-  build: DockerBuildOptions;
+  prepare?: boolean;
   api: CloudflareApiOptions;
-}
+} & (
+  | { build: DockerBuildOptions; image?: never }
+  | { image: string | Image | RemoteImage; build?: never }
+);
 const ContainerImage = Resource(
   "cloudflare::ContainerImage",
   async function (
@@ -535,6 +847,26 @@ const ContainerImage = Resource(
   ): Promise<ContainerImage> {
     // Registry images are retained, just like docker::Image.
     if (this.phase === "delete") return this.destroy();
+    if (props.image !== undefined) {
+      const api = await createCloudflareApi(props.api);
+      const imageRef = validateContainerImageReference(
+        api.accountId,
+        resolveImageName(
+          api.accountId,
+          typeof props.image === "string" ? props.image : props.image.imageRef,
+        ),
+      );
+      if (props.prepare) await prepareContainerImageOnce(api, imageRef);
+      return {
+        kind: "Image",
+        name: imageRef.split("@")[0],
+        tag: props.tag,
+        imageRef,
+        repoDigest: imageRef,
+        builtAt: Date.now(),
+        build: undefined,
+      };
+    }
     // If a prior push failed, the local image may be gone on the retrying
     // runner. Always rebuild when this outer resource actually runs.
     return alchemy.run("build", { force: true }, async () => {
@@ -551,6 +883,14 @@ const ContainerImage = Resource(
         username: credentials.username || credentials.user!,
         password: credentials.password,
       });
+      if (props.prepare) {
+        if (!pushed.repoDigest)
+          throw new Error(
+            `Container: image ${props.name} was pushed without a sha256 digest.`,
+          );
+        validateContainerImageReference(api.accountId, pushed.repoDigest);
+        await prepareContainerImageOnce(api, pushed.repoDigest);
+      }
       return { ...image, ...pushed };
     });
   },
@@ -604,7 +944,7 @@ export interface ContainerApplicationRollout {
  * Docker images with automatic scaling, scheduling, and integration with
  * Cloudflare's services.
  */
-export interface ContainerApplicationProps extends CloudflareApiOptions {
+interface DefaultContainerApplicationProps extends CloudflareApiOptions {
   /**
    * The name of the container application.
    * Must be unique within your Cloudflare account.
@@ -619,7 +959,7 @@ export interface ContainerApplicationProps extends CloudflareApiOptions {
    *
    * @default "default"
    */
-  schedulingPolicy?: SchedulingPolicy;
+  schedulingPolicy?: DefaultSchedulingPolicy;
 
   /**
    * The initial number of container instances to deploy.
@@ -714,6 +1054,29 @@ export interface ContainerApplicationProps extends CloudflareApiOptions {
   dev?: boolean;
 }
 
+export type ContainerApplicationProps =
+  | DefaultContainerApplicationProps
+  | (Omit<
+      DefaultContainerApplicationProps,
+      | "schedulingPolicy"
+      | "image"
+      | "instances"
+      | "instanceType"
+      | "maxInstances"
+      | "constraints"
+      | "rollout"
+      | "durableObjects"
+    > & {
+      schedulingPolicy: "durable_object";
+      durableObjects: { namespaceId: string };
+      image?: never;
+      instances?: never;
+      instanceType?: never;
+      maxInstances?: never;
+      constraints?: never;
+      rollout?: never;
+    });
+
 /**
  * Scheduling policies that control container placement and resource allocation.
  *
@@ -724,12 +1087,16 @@ export interface ContainerApplicationProps extends CloudflareApiOptions {
  * - `fill_metals`: Optimizes for resource utilization on dedicated hardware
  * - `default`: Uses Cloudflare's standard scheduling algorithm
  */
-export type SchedulingPolicy =
+type DefaultSchedulingPolicy =
   | "moon"
   | "gpu"
   | "regional"
   | "fill_metals"
-  | "default"
+  | "default";
+
+export type SchedulingPolicy =
+  | DefaultSchedulingPolicy
+  | "durable_object"
   | (string & {});
 
 /**
@@ -897,6 +1264,15 @@ export const ContainerApplication = Resource(
       return this.destroy();
     }
 
+    if (props.schedulingPolicy === "durable_object") {
+      return reconcileDurableObjectContainerApplication(
+        api,
+        applicationName,
+        props.durableObjects.namespaceId,
+        props.observability,
+      );
+    }
+
     // Prefer the immutable repo digest if present. Falls back to the tag reference.
     const imageReference = props.image.repoDigest ?? props.image.imageRef;
 
@@ -1046,6 +1422,102 @@ export const ContainerApplication = Resource(
     }
   },
 );
+
+export async function reconcileDurableObjectContainerApplication(
+  api: Pick<CloudflareApi, "accountId" | "get" | "post" | "patch">,
+  name: string,
+  namespaceId: string,
+  observability?: DeploymentObservability,
+): Promise<ContainerApplication> {
+  const endpoint = `/accounts/${api.accountId}/containers/applications`;
+  const validate = (application: ContainerApplicationData) => {
+    if (application.scheduling_policy !== "durable_object") {
+      throw new Error(
+        `Cannot move container application ${application.name} to durable_object scheduling: moving a default-policy class is one-way. A new Durable Object class is required.`,
+      );
+    }
+    if (
+      application.id !== namespaceId ||
+      application.durable_objects?.namespace_id !== namespaceId ||
+      application.name !== name
+    ) {
+      throw new Error(
+        `Cannot adopt container application ${application.name}: expected name ${name} and Durable Object namespace ${namespaceId} for both the application id and namespace id.`,
+      );
+    }
+  };
+  const response = await api.get(`${endpoint}/${namespaceId}`);
+  const result = (await response.json()) as {
+    result: ContainerApplicationData;
+    errors: { code: number; message: string }[];
+  };
+  let application: ContainerApplicationData;
+  if (response.status === 404) {
+    const created = await api.post(endpoint, {
+      name,
+      scheduling_policy: "durable_object",
+      durable_objects: { namespace_id: namespaceId },
+      ...(observability && { observability }),
+    });
+    const result = (await created.json()) as {
+      result: ContainerApplicationData;
+      errors: { code: number; message: string }[];
+    };
+    if (!created.ok) {
+      if (
+        created.status === 409 ||
+        result.errors?.some(
+          (error) =>
+            error.code === 1608 || error.message.includes("already exists"),
+        )
+      ) {
+        const listed = await api.get(endpoint);
+        const applications = (await listed.json()) as {
+          result: ContainerApplicationData[];
+        };
+        if (listed.ok) {
+          const existing = applications.result.find(
+            (application) =>
+              application.durable_objects?.namespace_id === namespaceId ||
+              application.name === name,
+          );
+          if (existing) validate(existing);
+        }
+      }
+      throw new Error(
+        `Failed to create container application: ${result.errors?.map((e) => `[${e.code}] ${e.message}`).join(", ") ?? "Unknown error"}`,
+      );
+    }
+    application = result.result;
+    validate(application);
+  } else {
+    if (!response.ok) {
+      throw new Error(
+        `Failed to get container application: ${result.errors?.map((e) => `[${e.code}] ${e.message}`).join(", ") ?? "Unknown error"}`,
+      );
+    }
+    application = result.result;
+    validate(application);
+    if (
+      observability !== undefined &&
+      !isDeepStrictEqual(application.observability, observability)
+    ) {
+      const patched = await api.patch(`${endpoint}/${namespaceId}`, {
+        observability,
+      });
+      const result = (await patched.json()) as {
+        result: ContainerApplicationData;
+        errors: { code: number; message: string }[];
+      };
+      if (!patched.ok) {
+        throw new Error(
+          `Failed to update container application: ${result.errors?.map((e) => `[${e.code}] ${e.message}`).join(", ") ?? "Unknown error"}`,
+        );
+      }
+    }
+  }
+  return { id: application.id, name: application.name };
+}
 
 /**
  * Complete data structure returned by the Cloudflare API for container applications.
