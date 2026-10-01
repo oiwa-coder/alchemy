@@ -312,7 +312,7 @@ export function isContainer(binding: any): binding is Container {
  *
  * @template T - Type parameter for additional container-specific properties
  */
-type DefaultContainer<T = any> = {
+export type DefaultContainer<T = any> = {
   /** Identifies this as a container binding type */
   type: "container";
 
@@ -378,26 +378,28 @@ type DefaultContainer<T = any> = {
   __phantom?: T;
 };
 
+export type DurableObjectContainer<T = any> = Omit<
+  DefaultContainer<T>,
+  | "image"
+  | "schedulingPolicy"
+  | "instanceType"
+  | "maxInstances"
+  | "rollout"
+  | "constraints"
+  | "name"
+> & {
+  name: string;
+  schedulingPolicy: "durable_object";
+  images: Record<string, Image>;
+};
+
 export type Container<T = any> =
   | DefaultContainer<T>
-  | (Omit<
-      DefaultContainer<T>,
-      | "image"
-      | "schedulingPolicy"
-      | "instanceType"
-      | "maxInstances"
-      | "rollout"
-      | "constraints"
-      | "name"
-    > & {
-      name: string;
-      schedulingPolicy: "durable_object";
-      images: Record<string, Image>;
-    });
+  | DurableObjectContainer<T>;
 
 export function isDurableObjectContainer<T = any>(
   binding: unknown,
-): binding is Extract<Container<T>, { schedulingPolicy: "durable_object" }> {
+): binding is DurableObjectContainer<T> {
   return (
     typeof binding === "object" &&
     binding !== null &&
@@ -479,7 +481,7 @@ export function resolveImageName(accountId: string, image: string): string {
 export function Container<T>(
   id: string,
   props: ContainerPropsWithDurableObjectScheduling,
-): Promise<Extract<Container<T>, { schedulingPolicy: "durable_object" }>>;
+): Promise<DurableObjectContainer<T>>;
 export function Container<T>(
   id: string,
   props: ContainerPropsWithImage | ContainerPropsWithBuild,
@@ -665,7 +667,7 @@ export async function Container<T>(
 async function createDurableObjectContainer<T>(
   id: string,
   props: ContainerPropsWithDurableObjectScheduling,
-): Promise<Extract<Container<T>, { schedulingPolicy: "durable_object" }>> {
+): Promise<DurableObjectContainer<T>> {
   const scope = Scope.current;
   const name = props.name ?? scope.createPhysicalName(id);
   const isDev = scope.local && !props.dev?.remote;
@@ -2052,7 +2054,7 @@ export async function getContainerIdentity(api: CloudflareApi) {
  */
 export type Duration = string;
 
-interface DeploymentObservability {
+export interface DeploymentObservability {
   logs?: {
     enabled: boolean;
   };
