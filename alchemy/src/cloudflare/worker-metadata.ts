@@ -635,6 +635,12 @@ export async function prepareWorkerMetadata(
         name: bindingName,
         namespace: binding.namespaceName,
       });
+    } else if (binding.type === "flagship") {
+      meta.bindings.push({
+        type: "flagship",
+        name: bindingName,
+        app_id: binding.appId,
+      });
     } else if (binding.type === "worker_loader") {
       meta.bindings.push({
         type: "worker_loader",

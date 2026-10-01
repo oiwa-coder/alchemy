@@ -645,6 +645,8 @@ async function processBindings(
         class_name: binding.className,
         image,
       });
+    } else if (binding.type === "flagship") {
+      continue;
     } else if (binding.type === "worker_loader") {
       workerLoaders.push({
         binding: bindingName,

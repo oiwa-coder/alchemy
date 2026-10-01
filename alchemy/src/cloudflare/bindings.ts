@@ -31,6 +31,7 @@ import type { EmailSender } from "./email-sender.ts";
 import type { VectorizeIndex } from "./vectorize-index.ts";
 import type { VersionMetadata } from "./version-metadata.ts";
 import type { VpcService } from "./vpc-service.ts";
+import type { Flagship } from "./flagship.ts";
 import type { WorkerLoader } from "./worker-loader.ts";
 import type { WorkerRef } from "./worker-ref.ts";
 import type { WorkerStub } from "./worker-stub.ts";
@@ -87,6 +88,7 @@ export type Binding =
   | WorkerRef
   | WorkerEntrypoint
   | WorkerLoader
+  | Flagship
   | Workflow
   | BrowserRendering
   | VersionMetadata
@@ -157,6 +159,7 @@ export type WorkerBindingSpec =
   | WorkerBindingVersionMetadata
   | WorkerBindingWasmModule
   | WorkerBindingWorkerLoader
+  | WorkerBindingFlagship
   | WorkerBindingWorkflow
   | WorkerBindingVpcService;
 
@@ -601,4 +604,10 @@ export interface WorkerBindingWorkerLoader {
   name: string;
   /** Type identifier for Worker Loader binding */
   type: "worker_loader";
+}
+
+export interface WorkerBindingFlagship {
+  name: string;
+  type: "flagship";
+  app_id: string;
 }

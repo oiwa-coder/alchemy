@@ -422,6 +422,8 @@ export const buildWorkerOptions = async (
         });
         break;
       }
+      case "flagship":
+        break;
       case "worker_loader": {
         (options.workerLoaders ??= {})[key] = {};
         break;
