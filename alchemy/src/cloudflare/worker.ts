@@ -2037,20 +2037,58 @@ export async function deleteWorker(
   );
 }
 
+const VERSION_READ_BACK_DELAYS_MS = [
+  1_000, 2_000, 4_000, 8_000, 15_000, 30_000,
+];
+
+const VERSION_NOT_FOUND_CODE = 100146;
+
 async function getVersionMetadata(
   api: CloudflareApi,
   scriptName: string,
-  deploymentId: string,
+  versionId: string,
 ) {
-  const response = await api.get(
-    `/accounts/${api.accountId}/workers/scripts/${scriptName}/versions/${deploymentId}`,
-  );
-  const result = (await response.json()) as {
-    result: {
-      resources: {
-        bindings: WorkerBindingSpec[];
-      };
-    };
-  };
-  return result.result;
+  if (!versionId) {
+    throw new Error(
+      `The upload of Worker "${scriptName}" returned no version id, so its container bindings cannot be read.`,
+    );
+  }
+
+  for (let attempt = 0; ; attempt++) {
+    const response = await api.get(
+      `/accounts/${api.accountId}/workers/scripts/${scriptName}/versions/${versionId}`,
+    );
+    const body = (await response.json().catch(() => null)) as {
+      result?: {
+        resources: {
+          bindings: WorkerBindingSpec[];
+        };
+      } | null;
+      errors?: { code: number; message: string }[];
+    } | null;
+
+    if (response.ok && body?.result) return body.result;
+
+    const notReadableYet =
+      response.status === 404 ||
+      (body?.errors ?? []).some(
+        (error) => error.code === VERSION_NOT_FOUND_CODE,
+      );
+    const delay = VERSION_READ_BACK_DELAYS_MS[attempt];
+
+    if (!notReadableYet || delay === undefined) {
+      const errors = (body?.errors ?? [])
+        .map((error) => `${error.code}: ${error.message}`)
+        .join("; ");
+
+      throw new Error(
+        `Could not read version ${versionId} of Worker "${scriptName}" after upload: HTTP ${response.status}${errors ? ` (${errors})` : ""}${attempt > 0 ? ` after ${attempt + 1} attempts` : ""}.`,
+      );
+    }
+
+    logger.warn(
+      `Version ${versionId} of Worker "${scriptName}" is not readable yet (HTTP ${response.status}); retrying in ${delay / 1000}s.`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
 }
